@@ -1,4 +1,5 @@
 ---
+---
 layout: post
 title: "VMCS by Practice: Notes from Writing a Hypervisor"
 date: 2026-05-20
