@@ -2,3 +2,4 @@ theme: minima
 title: IWishI808
 description: Low-level systems, hypervisors, and reverse engineering.
 future: true
+permalink: pretty
