@@ -1,5 +1,13 @@
 theme: minima
 title: IWishI808
-description: Low-level systems, hypervisors, and reverse engineering.
+description: Security Research - Low-level systems, virtualization, and reverse engineering
 future: true
 permalink: pretty
+
+header_pages:
+  - projects.md
+  - writeups.md
+  - about.md
+
+minima:
+  skin: dark
