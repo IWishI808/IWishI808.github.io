@@ -4,23 +4,22 @@ title: Projects
 permalink: /projects/
 ---
 
-Tools and research projects focused on defensive security, detection engineering, and low-level system analysis.
+Public research prototypes focused on defensive security, detection engineering, and low-level system analysis.
 
 ---
 
 ### [HvShield](https://github.com/IWishI808/HvShield) - Hypervisor-Based Memory Integrity Monitor
 
-A thin Intel VT-x hypervisor that uses EPT (Extended Page Tables) to enforce kernel code integrity at the hardware level.
+A defensive research prototype that explores Intel VT-x and EPT (Extended Page Tables) for kernel memory integrity monitoring.
 
-The hypervisor sits below the OS and monitors write access to critical kernel memory regions. Any attempt to modify protected pages (code sections, SSDT, IDT) triggers an EPT violation that gets logged and optionally blocked before it reaches the OS.
+The code studies how a hypervisor can sit below the OS and observe writes to protected memory regions. Protected pages can be represented through EPT permissions so access attempts trap as EPT violations for analysis.
 
-Built from scratch in C, no framework dependencies. Handles VMCS lifecycle, EPT construction with 2MB large pages, MTRR-aware memory typing, and multi-core VMLAUNCH/VMRESUME scheduling.
+Built from scratch in C as a source-level prototype. It includes VMX support checks, VMXON/VMCS scaffolding, EPT structure definitions, identity-map construction with 2 MB pages, and MTRR-aware memory typing.
 
-**What it detects:**
+**Defensive research goals:**
 - Kernel code patching (rootkit installation)
-- SSDT hooking
-- IDT modification
-- Unauthorized driver code modification
+- SSDT or IDT modification research
+- Unauthorized driver code modification monitoring
 
 **Stack:** C, Intel VT-x, EPT, Windows kernel
 **Writeup:** [VMCS by Practice](/2026/05/20/vmcs-by-practice/), [EPT Internals](/2026/05/18/ept-internals/)
@@ -29,13 +28,13 @@ Built from scratch in C, no framework dependencies. Handles VMCS lifecycle, EPT 
 
 ### [CRTScan](https://github.com/IWishI808/CRTScan) - DLL Injection Detection via CRT Fingerprinting
 
-A detection tool that identifies injected DLLs by analyzing C Runtime artifacts. Based on the observation that `__security_init_cookie` calls 4 hookable API functions during initialization, and the return addresses from those calls reveal the calling module.
+A defensive prototype that identifies suspicious DLLs by analyzing C Runtime artifacts, PE structure, and return addresses around common initialization-related APIs.
 
 Hooks `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, `GetCurrentProcessId`, and `GetCurrentThreadId`. When any of these fire, it walks the call stack and checks whether the return address belongs to a signed, known module. Unsigned callers get flagged.
 
 Also performs static analysis on loaded modules: checks for missing security cookies, minimal import tables, absent `.pdata` sections, and other NoCRT indicators that suggest a purpose-built injection payload.
 
-**What it detects:**
+**Detection signals:**
 - CRT-linked unsigned DLLs via return address analysis
 - NoCRT payloads via structural anomaly scoring
 - Late-loaded modules that weren't part of the original process
@@ -47,7 +46,7 @@ Also performs static analysis on loaded modules: checks for missing security coo
 
 ### [VTCheck](https://github.com/IWishI808/VTCheck) - Virtual Method Table Integrity Verifier
 
-A runtime integrity checker for COM and C++ vtables. Validates that vtable pointers reference `.rdata` sections within their expected modules, and that individual function entries haven't been redirected outside the module boundary.
+A runtime integrity checker for COM and C++ vtables. It validates that vtable pointers reference `.rdata` sections within expected modules and that individual function entries stay inside the expected module boundary.
 
 Performs RTTI chain validation on MSVC binaries by walking `CompleteObjectLocator` structures to verify class hierarchy integrity. Detects both direct vtable patching (modified entries in original `.rdata`) and full vtable replacement (object pointing to heap-allocated copy).
 
@@ -66,18 +65,17 @@ Built to monitor DXGI/D3D11 COM interfaces, which are frequent targets for both 
 
 ### [PEBWatch](https://github.com/IWishI808/PEBWatch) - Process Environment Block Tamper Detection
 
-A lightweight monitoring agent that periodically snapshots PEB state and cross-references it against kernel-side ground truth to detect manipulation.
+A lightweight monitoring agent that periodically snapshots PEB state and cross-references it against image-backed memory regions to detect manipulation.
 
-Compares the PEB module list against the VAD tree and ETW module load history to find unlinked modules. Checks `ImagePathName`, `CommandLine`, `BeingDebugged`, and `NtGlobalFlag` for signs of post-creation tampering. Also monitors heap flags for anti-debug environment detection.
+Compares the PEB module list against image-backed memory regions discovered through `VirtualQuery` to find unlinked modules. Checks `ImagePathName`, `CommandLine`, `BeingDebugged`, and `NtGlobalFlag` for signs of post-creation tampering.
 
 **What it detects:**
 - Module unlinking (DLLs hidden from PEB but still loaded)
 - ImagePathName spoofing
 - CommandLine modification post-creation
 - Anti-debug PEB field clearing
-- Heap flag manipulation
 
-**Stack:** C, Windows internals, ETW
+**Stack:** C, Windows internals, PEB analysis
 **Writeup:** [PEB Internals](/2026/05/15/peb-windows-internals/)
 
 ---
