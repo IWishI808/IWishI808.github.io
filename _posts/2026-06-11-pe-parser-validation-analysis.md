@@ -1,13 +1,13 @@
 ---
 layout: post
-title: "PE Header Validation: How Parsers Fail and What Defenders Can Learn"
+title: "PE Header Validation: Defensive Parser Testing and Failure Patterns"
 date: 2026-06-11
 tags: [reverse-engineering, pe-format, vulnerability-research, malware-analysis, fuzzing, c++]
 ---
 
-Most security tools that inspect PE files share the same implicit assumption: the file they are handed is structurally sound. This assumption is wrong in exactly the cases where it matters most — when analyzing attacker-controlled binaries. Understanding how PE parsers fail under adversarial input is useful both for writing better defensive tooling and for identifying vulnerabilities in open-source security tools.
+Most security tools that inspect PE files share the same implicit assumption: the file they are handed is structurally sound. This assumption is wrong in exactly the cases where it matters most - when analyzing attacker-controlled binaries. Understanding how PE parsers behave under malformed input is useful for writing better defensive tooling and for evaluating the resilience of open-source security tools.
 
-This post analyzes the PE header validation patterns in C++ parsers, focusing on pe-parse (Trail of Bits), and documents the classes of bugs that arise from insufficient input validation against the PE specification.
+This post documents PE header validation patterns in C++ parsers, using pe-parse (Trail of Bits) as a reference point for studying parser architecture and trust boundaries. It is not a vulnerability disclosure for pe-parse. The goal is to describe the classes of failures defenders should test for when they rely on file-format parsers in malware analysis, EDR, sandboxing, or triage pipelines.
 
 ---
 
@@ -40,7 +40,7 @@ Every field that describes a location or size in the PE format can be set to an 
 - `SizeOfRawData` — how many bytes to read from disk for a section
 - `NumberOfRvaAndSizes` — how many data directories exist
 
-A parser that reads these fields and acts on them without validation is one adversarial PE away from a crash.
+A parser that reads these fields and acts on them without validation can become fragile under malformed or adversarial PE samples.
 
 ---
 
@@ -70,7 +70,7 @@ parsed_pe *ParsePEFromPointer(uint8_t *data, uint64_t len) {
 }
 ```
 
-This is the correct pattern. The interesting question is whether every subsequent step maintains the same discipline — especially in the less-traveled paths.
+This is the correct pattern. The useful audit question is whether every subsequent step maintains the same discipline - especially in less-traveled parsing paths and optional metadata handlers.
 
 ---
 
@@ -125,13 +125,13 @@ if (raw_end > file_size) {
 }
 ```
 
-This is not just a crash vector — it is a **information disclosure** bug in parsers that expose section content to callers, since the extra bytes read contain whatever was in memory adjacent to the file buffer.
+This is not just a crash vector. In parsers that expose section content to callers, unchecked reads can also become an information disclosure issue, because the returned bytes may include memory adjacent to the file buffer.
 
 ### 3.3 Overlapping Sections
 
-The PE spec does not prohibit section headers where `PointerToRawData` values overlap. A parser that maps sections into a trusted in-memory representation without detecting overlaps may process the same bytes as two different sections — a source of logic bugs in signature validation and hash computation.
+The PE spec does not prohibit section headers where `PointerToRawData` values overlap. A parser that maps sections into a trusted in-memory representation without detecting overlaps may process the same bytes as two different sections - a source of logic bugs in signature validation and hash computation.
 
-A well-formed PE for legitimate use cases never has overlapping sections. A PE crafted for analysis evasion commonly does.
+A well-formed PE from a normal compiler usually does not have overlapping sections. Malformed files used for robustness testing or analysis evasion commonly do.
 
 Detection:
 
@@ -144,7 +144,7 @@ for (int i = 0; i < n_sections; i++) {
         uint32_t b_start = sections[j].PointerToRawData;
         uint32_t b_end   = b_start + sections[j].SizeOfRawData;
         if (a_start < b_end && b_start < a_end) {
-            // overlapping sections — flag as malformed
+            // overlapping sections - flag as malformed
         }
     }
 }
@@ -163,7 +163,7 @@ for (DWORD i = 0; i < opt->NumberOfRvaAndSizes; i++) {
 }
 ```
 
-If `NumberOfRvaAndSizes` is `0xFFFFFFFF`, this loop runs off the end of the optional header and into section headers, then off the end of the file buffer.
+If `NumberOfRvaAndSizes` is `0xFFFFFFFF`, this loop can run off the end of the optional header and into unrelated file data unless the parser caps and bounds-checks the access.
 
 The fix is a bounds cap:
 
@@ -187,7 +187,7 @@ A parser that fails to handle these gracefully will either crash, return a wrong
 
 ## 4. Crafting Adversarial PE Files for Testing
 
-To test a parser's resilience, craft PE files that hit each validation boundary. A minimal test corpus for a PE parser:
+To test a parser's resilience, create PE files that hit each validation boundary. A minimal local test corpus for a PE parser:
 
 ```python
 import struct
@@ -211,11 +211,12 @@ def corrupt_section_count(pe_bytes, count):
 INTERESTING_COUNTS = [0, 1, 96, 256, 0xFFFF]
 ```
 
-The approach:
+The safe local approach:
 1. Start with a valid PE (a real system binary)
 2. Patch individual fields to boundary values
 3. Run the target parser against each variant
-4. Check for crashes, assertions, or wrong output
+4. Check for crashes, assertions, or incorrect parser output
+5. Do not run malformed samples against third-party services or production systems
 
 For crash discovery, compile the parser with AddressSanitizer:
 
@@ -235,7 +236,7 @@ ASAN will report out-of-bounds reads before they manifest as crashes in producti
 
 ### 5.1 Parser Bugs as Detection Evasion
 
-A PE file crafted to crash or misbehave analysis tools is a detection evasion technique. If an EDR's PE parser segfaults on malformed input, the signature check never runs. If a sandbox's import extractor reads the wrong offset due to integer overflow in RVA translation, the malware's actual imports go undetected.
+A PE file that causes analysis tools to crash or misparse can become a detection-evasion technique. If an EDR's PE parser fails on malformed input, the signature check may never run. If a sandbox's import extractor reads the wrong offset due to integer overflow in RVA translation, the malware's actual imports may go undetected.
 
 Malware families have been observed using:
 - Overlapping sections to confuse hash-based detection
@@ -247,21 +248,21 @@ Malware families have been observed using:
 
 A PE parser used in a security context should:
 
-1. **Reject rather than truncate** — if a field describes data that extends past the file, reject the file as malformed rather than silently reading less
-2. **Validate every offset before dereference** — every pointer derived from a header field gets bounds-checked before use
-3. **Cap unbounded counts** — `NumberOfSections`, `NumberOfRvaAndSizes`, import thunk counts all get sanity caps
-4. **Use 64-bit arithmetic for size calculations** — prevents overflow in the multiplication step
-5. **Detect structural anomalies** — overlapping sections, duplicate section names, zero-length sections with data, negative `VirtualSize` — and surface them to the caller
+1. **Reject rather than truncate** - if a field describes data that extends past the file, reject the file as malformed rather than silently reading less
+2. **Validate every offset before dereference** - every pointer derived from a header field gets bounds-checked before use
+3. **Cap unbounded counts** - `NumberOfSections`, `NumberOfRvaAndSizes`, import thunk counts all get sanity caps
+4. **Use 64-bit arithmetic for size calculations** - prevents overflow in the multiplication step
+5. **Detect structural anomalies** - overlapping sections, duplicate section names, zero-length sections with data, inconsistent sizes - and surface them to the caller
 
 A parser that silently handles malformed input by truncating reads or skipping checks makes it impossible for the caller to know whether the analysis result is trustworthy.
 
 ### 5.3 For Malware Analysts
 
 When analyzing a suspicious sample:
-- Check `e_lfanew` — values over `0x1000` are rare in legitimate software and may indicate tampering or a packer
-- Compare `SizeOfRawData` vs. actual bytes before the next section's `PointerToRawData` — discrepancies indicate padding or overlay data hidden by the parser
-- Verify `NumberOfSections` against the physical file size — a claimed section count that implies section headers extending past the file is a corruption or evasion indicator
-- Check for overlapping sections — legitimate compilers do not produce them
+- Check `e_lfanew` - values over `0x1000` are rare in legitimate software and may indicate tampering or a packer
+- Compare `SizeOfRawData` vs. actual bytes before the next section's `PointerToRawData` - discrepancies indicate padding or overlay data hidden by the parser
+- Verify `NumberOfSections` against the physical file size - a claimed section count that implies section headers extending past the file is a corruption or evasion indicator
+- Check for overlapping sections - legitimate compilers do not produce them
 
 ---
 
@@ -269,19 +270,20 @@ When analyzing a suspicious sample:
 
 The analysis in this post is based on reading source code and understanding the PE format. Any testing was done against files I created in an isolated environment.
 
-If you identify a crash or correctness bug in an open-source parser through this methodology:
-1. Open a GitHub Security Advisory on the project's repository (Settings → Security → Advisories)
-2. Give maintainers 90 days to patch before public disclosure
-3. Request a CVE through the project's CNA or directly via cveform.mitre.org
+If you identify a crash, memory-safety bug, or security-relevant correctness issue in an open-source parser through this methodology:
+1. Check the project's `SECURITY.md` or published security contact first
+2. Report privately with a minimal reproducer, affected version or commit, sanitizer output, and impact analysis
+3. Coordinate publication with maintainers and avoid releasing weaponized samples before a fix is available
+4. If the issue is eligible, request a CVE through the project's CNA, GitHub Security Advisory flow, or the MITRE CNA of Last Resort request path
 
-Trail of Bits, the maintainer of pe-parse, has a documented security contact and responds to responsible disclosure. Most active open-source security tools do.
+The goal is coordinated disclosure: give maintainers a clear path to reproduce, patch, and publish without surprising downstream users.
 
 ---
 
 ## Conclusion
 
-PE parsers occupy a critical position in the defensive security stack: everything from EDR signature engines to sandbox unpacking depends on correct PE interpretation. A parser that crashes or misparses under adversarial input is not just a reliability problem — it is a security boundary failure.
+PE parsers occupy a critical position in the defensive security stack: everything from EDR signature engines to sandbox unpacking depends on correct PE interpretation. A parser that crashes or misparses under adversarial input is not just a reliability problem. In a defensive pipeline, it can become a security boundary failure.
 
-The validation patterns described here — integer overflow in size calculations, unbounded iteration on header-supplied counts, unchecked offset arithmetic — are not exotic. They are the same bugs that appear in network protocol parsers and file format handlers across the industry. The PE format is old and well-documented, but the attack surface created by parsers that trust it unconditionally is still largely unexamined in the open-source security tooling ecosystem.
+The validation patterns described here - integer overflow in size calculations, unbounded iteration on header-supplied counts, unchecked offset arithmetic - are not exotic. They are the same bugs that appear in network protocol parsers and file format handlers across the industry. The PE format is old and well-documented, but the attack surface created by parsers that trust it unconditionally still deserves regular review in the open-source security tooling ecosystem.
 
 For defenders: audit the PE parsers in your stack the same way you audit the tools they are supposed to protect against.
